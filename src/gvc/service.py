@@ -18,9 +18,13 @@ class ServiceError(RuntimeError):
 
 
 def is_up(url: str) -> bool:
+    """True once the server answers without a server error.
+
+    llama-server answers /health with 503 while it is still downloading or loading
+    the model, so a listening socket alone does not mean ready.
+    """
     try:
-        httpx.get(url, timeout=2.0)
-        return True
+        return httpx.get(url, timeout=2.0).status_code < 500
     except httpx.TransportError:
         return False
 

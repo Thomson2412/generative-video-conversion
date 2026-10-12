@@ -41,7 +41,7 @@ def test_literal(sample_video, tmp_path, fake_captioner, fake_generator):
     unique = [i for i in range(TOTAL) if a.dup_of[i] == i]
 
     assert video.count_frames(out) == TOTAL
-    assert [c["image"] for c in fake_captioner.calls] == [frame_name(i) for i in unique]
+    assert sorted(c["image"] for c in fake_captioner.calls) == [frame_name(i) for i in unique]
     assert all(c["history"] == [] for c in fake_captioner.calls)
     # Duplicate frames share caption and seed, so their image is reused, not regenerated.
     assert len(fake_generator.calls) == len(unique)
@@ -158,3 +158,34 @@ def test_stale_caption_is_redone_without_context(sample_video, tmp_path):
     records = load_captions(p.wd.captions)
     assert records[1]["kind"] == "stale-retry"
     assert records[1]["caption"] == "fresh 000002"
+
+
+def test_parallel_captions_without_context(sample_video, tmp_path):
+    p = make(sample_video, tmp_path, "literal", caption={"parallel": 4})
+    captioner = FakeCaptioner()
+    p.caption(captioner)
+    a = analysis(p)
+    unique = sorted(frame_name(i) for i in range(TOTAL) if a.dup_of[i] == i)
+    assert sorted(c["image"] for c in captioner.calls) == unique
+    records = load_captions(p.wd.captions)
+    assert sorted(records) == list(range(TOTAL))
+    assert all(records[i]["caption"] == records[a.dup_of[i]]["caption"] for i in range(TOTAL))
+
+
+def test_parallel_caption_failure_keeps_finished_captions(sample_video, tmp_path):
+    p = make(sample_video, tmp_path, "literal", caption={"parallel": 2}, dedupe={"max_distance": -1})
+    with pytest.raises(RuntimeError):
+        p.caption(FakeCaptioner(fail_after=5))
+    done = load_captions(p.wd.captions)
+    assert 0 < len(done) < TOTAL
+
+    resumed = FakeCaptioner()
+    p.caption(resumed)
+    assert len(resumed.calls) == TOTAL - len(done)
+
+
+def test_bench_sample_frames():
+    from gvc.bench import sample_frames
+
+    assert sample_frames([0, 0, 2, 3, 3, 5], 10) == [0, 2, 3, 5]
+    assert sample_frames(list(range(100)), 4) == [0, 25, 50, 75]

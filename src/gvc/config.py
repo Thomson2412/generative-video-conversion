@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+CAPTION_BACKENDS = ("ollama", "llama-server")
 CAPTION_CONTEXTS = ("none", "text", "text+image")
 GENERATE_INITS = ("none", "chain", "chain-ref", "source")
 REF_METHODS = ("ip-adapter", "ref-images")
@@ -38,7 +39,14 @@ def runtime(default: Any = None, *, factory: Any = None) -> Any:
 
 @dataclass
 class CaptionConfig:
+    # ollama | llama-server
+    backend: str = "ollama"
+    # Ollama model name (backend = "ollama").
     model: str = "qwen2.5vl:7b"
+    # backend = "llama-server": a Hugging Face "repo[:quant]" (downloaded by llama-server,
+    # vision projector included) or a path to a local .gguf (then also set llama_mmproj).
+    llama_model: str = "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M"
+    llama_mmproj: str = ""
     # Caption propagation: none | text (previous caption) | text+image (+ previous source frame)
     context: str = "text"
     # How many previous captions to pass when context != none.
@@ -46,13 +54,22 @@ class CaptionConfig:
     max_words: int = 60
     temperature: float = 0.2
     seed: int = 42
+    # Longest side of the image sent to the LLM (0 = original). Fewer pixels means
+    # fewer image tokens, which dominates captioning time.
+    image_size: int = 512
     # A context caption is treated as "stuck" and redone without context when it is
     # at least this similar to the previous caption while the frame changed by at
     # least stale_diff (mean absolute pixel difference, 0..1).
     stale_similarity: float = 0.97
     stale_diff: float = 0.08
+    # Concurrent caption requests. Only used when context = "none", because context
+    # captions depend on the previous one.
+    parallel: int = runtime(4)
     ollama_url: str = runtime("http://127.0.0.1:11434")
-    # Start `ollama serve` when nothing is listening on ollama_url.
+    llama_url: str = runtime("http://127.0.0.1:8080")
+    # Extra llama-server flags, e.g. ["--image-max-tokens", "256"].
+    llama_server_args: list[str] = runtime(factory=list)
+    # Start the backend server when nothing is listening on its URL.
     manage_server: bool = runtime(True)
     timeout: float = runtime(600.0)
 
@@ -127,6 +144,10 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def validate(self) -> None:
+        if self.caption.backend not in CAPTION_BACKENDS:
+            raise ConfigError(f"caption.backend must be one of {CAPTION_BACKENDS}, got {self.caption.backend!r}")
+        if self.caption.parallel < 1:
+            raise ConfigError("caption.parallel must be >= 1")
         if self.caption.context not in CAPTION_CONTEXTS:
             raise ConfigError(f"caption.context must be one of {CAPTION_CONTEXTS}, got {self.caption.context!r}")
         if self.generate.init not in GENERATE_INITS:

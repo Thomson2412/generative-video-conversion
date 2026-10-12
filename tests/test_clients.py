@@ -1,11 +1,14 @@
 import base64
+import io
 import json
 
 import httpx
+from PIL import Image
 
-from gvc.captioner import OllamaCaptioner, clean_caption
-from gvc.config import GenerateConfig
+from gvc.captioner import LlamaServerCaptioner, OllamaCaptioner, clean_caption, encode_image, llama_server_cmd
+from gvc.config import CaptionConfig, GenerateConfig
 from gvc.generator import SdServerGenerator, generation_size, sd_server_cmd
+from gvc.service import is_up
 
 from .conftest import png
 
@@ -30,23 +33,79 @@ def _capture(responses):
     return requests, httpx.MockTransport(handler)
 
 
-def test_ollama_context_message(tmp_path):
+def _frames(tmp_path):
     cur, prev = tmp_path / "cur.png", tmp_path / "prev.png"
-    cur.write_bytes(b"current")
-    prev.write_bytes(b"previous")
+    cur.write_bytes(png((0, 0, 255), (1920, 1080)))
+    prev.write_bytes(png((255, 0, 0), (1920, 1080)))
+    return cur, prev
+
+
+def _decode(b64: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(b64)))
+
+
+def test_encode_image_scales_longest_side_and_uses_jpeg(tmp_path):
+    cur, _ = _frames(tmp_path)
+    small = _decode(encode_image(cur, 512))
+    assert small.format == "JPEG" and small.size == (512, 288)
+    assert _decode(encode_image(cur, 0)).size == (1920, 1080)
+    assert _decode(encode_image(cur, 4000)).size == (1920, 1080)  # never upscales
+
+
+def test_ollama_context_message(tmp_path):
+    cur, prev = _frames(tmp_path)
     requests, transport = _capture(lambda r: httpx.Response(200, json={"message": {"content": "Prompt: a dog"}}))
-    captioner = OllamaCaptioner("http://ollama", "m", transport=transport)
+    captioner = OllamaCaptioner("http://ollama", "m", image_size=256, transport=transport)
 
     assert captioner.describe(cur, ["a cat"], prev) == "a dog"
     body = json.loads(requests[0].content)
     user = body["messages"][1]
     assert "a cat" in user["content"]
-    assert user["images"] == [base64.b64encode(b"previous").decode(), base64.b64encode(b"current").decode()]
+    # Previous frame first, then the current one, both scaled down.
+    first, second = (_decode(b) for b in user["images"])
+    assert first.getpixel((0, 0))[0] > 200 and second.getpixel((0, 0))[2] > 200
+    assert second.size == (256, 144)
     assert body["options"]["seed"] == 42
 
     captioner.describe(cur, [])
     user = json.loads(requests[1].content)["messages"][1]
-    assert user["images"] == [base64.b64encode(b"current").decode()]
+    assert len(user["images"]) == 1
+
+
+def test_llama_server_openai_message(tmp_path):
+    cur, prev = _frames(tmp_path)
+    requests, transport = _capture(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "a dog"}}]})
+    )
+    captioner = LlamaServerCaptioner("http://llama", seed=3, transport=transport)
+    assert captioner.describe(cur, ["a cat"], prev) == "a dog"
+    assert requests[0].url.path == "/v1/chat/completions"
+    body = json.loads(requests[0].content)
+    parts = body["messages"][1]["content"]
+    assert [p["type"] for p in parts] == ["image_url", "image_url", "text"]
+    assert parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert "a cat" in parts[2]["text"]
+    assert body["seed"] == 3 and body["max_tokens"] == 180
+
+
+def test_llama_server_cmd():
+    cmd = llama_server_cmd(CaptionConfig(parallel=3, llama_url="http://0.0.0.0:9001"))
+    assert cmd[:5] == ["llama-server", "--host", "0.0.0.0", "--port", "9001"]
+    assert cmd[cmd.index("--parallel") + 1] == "3"
+    assert cmd[cmd.index("--hf-repo") + 1] == "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M"
+
+    cmd = llama_server_cmd(CaptionConfig(llama_model="m.gguf", llama_mmproj="p.gguf", llama_server_args=["-fa", "on"]))
+    assert "--hf-repo" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "m.gguf" and cmd[cmd.index("--mmproj") + 1] == "p.gguf"
+    assert cmd[-2:] == ["-fa", "on"]
+
+
+def test_is_up_waits_for_loading_server(monkeypatch):
+    status = {"code": 503}
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: httpx.Response(status["code"]))
+    assert not is_up("http://llama/health")
+    status["code"] = 200
+    assert is_up("http://llama/health")
 
 
 def _sd(cfg: GenerateConfig):

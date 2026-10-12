@@ -20,6 +20,7 @@ import io
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,10 +32,10 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 
 from . import video
 from .analysis import Analysis, analyze
-from .captioner import Captioner, OllamaCaptioner
+from .captioner import Captioner, captioner_service
 from .config import Config, fingerprint
 from .generator import Generator, SdServerGenerator, build_prompt, generation_size, sd_server_cmd
-from .service import host_port, managed_service
+from .service import managed_service
 from .video import VideoInfo, frame_name
 
 
@@ -212,8 +213,8 @@ class Pipeline:
         if captioner is not None:
             self._caption_frames(analysis, captioner)
         else:
-            with self._ollama() as ollama:
-                self._caption_frames(analysis, ollama)
+            with captioner_service(self.cfg.caption, self.wd.logs) as service:
+                self._caption_frames(analysis, service)
         self.manifest.finish("caption")
 
     def generate(self, generator: Generator | None = None) -> None:
@@ -249,25 +250,6 @@ class Pipeline:
     # -- services -------------------------------------------------------------------
 
     @contextmanager
-    def _ollama(self) -> Iterator[OllamaCaptioner]:
-        c = self.cfg.caption
-        host, port = host_port(c.ollama_url, 11434)
-        with managed_service(
-            "ollama",
-            c.ollama_url,
-            ["ollama", "serve"],
-            self.wd.logs / "ollama.log",
-            c.manage_server,
-            env={"OLLAMA_HOST": f"{host}:{port}"},
-        ):
-            captioner = OllamaCaptioner(c.ollama_url, c.model, c.max_words, c.temperature, c.seed, c.timeout)
-            captioner.ensure_model()
-            try:
-                yield captioner
-            finally:
-                captioner.unload()
-
-    @contextmanager
     def _sd_server(self) -> Iterator[SdServerGenerator]:
         g = self.cfg.generate
         with managed_service(
@@ -301,15 +283,37 @@ class Pipeline:
         c = self.cfg.caption
         captions = load_captions(self.wd.captions)
         with self.wd.captions.open("a") as out:
+
+            def save(record: dict) -> None:
+                captions[record["i"]] = record
+                out.write(json.dumps(record) + "\n")
+                out.flush()
+
+            if c.context == "none" and c.parallel > 1:
+                # Independent captions: unique frames concurrently, duplicates below.
+                self._caption_parallel(analysis, captioner, captions, save, c.parallel)
             for i in self._loop("Captioning", lambda i: i in captions):
                 canonical = analysis.dup_of[i]
                 if canonical != i:
-                    record = {"i": i, "caption": captions[canonical]["caption"], "kind": "dup"}
+                    save({"i": i, "caption": captions[canonical]["caption"], "kind": "dup"})
                 else:
-                    record = self._caption_one(i, analysis, captions, captioner, c)
-                captions[i] = record
-                out.write(json.dumps(record) + "\n")
-                out.flush()
+                    save(self._caption_one(i, analysis, captions, captioner, c))
+
+    def _caption_parallel(
+        self, analysis: Analysis, captioner: Captioner, captions: dict[int, dict], save: Callable[[dict], None], workers: int
+    ) -> None:
+        todo = [i for i in range(self.frame_count) if analysis.dup_of[i] == i and i not in captions]
+        pool = ThreadPoolExecutor(workers)
+        try:
+            with _progress(self.console) as progress:
+                task = progress.add_task(f"Captioning ({workers} parallel)", total=len(todo))
+                futures = {pool.submit(captioner.describe, self._frame(i), []): i for i in todo}
+                for future in as_completed(futures):
+                    save({"i": futures[future], "caption": future.result(), "kind": "fresh"})
+                    progress.advance(task)
+        finally:
+            # On error, drop queued requests instead of finishing them.
+            pool.shutdown(cancel_futures=True)
 
     def _caption_one(self, i, analysis: Analysis, captions: dict[int, dict], captioner: Captioner, c) -> dict:
         use_context = c.context != "none" and not analysis.reset[i]

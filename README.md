@@ -27,7 +27,7 @@ gvc models                      # SDXL-Turbo + fp16-fixed VAE (~7.3 GB)
 gvc models --preset full-ref    # additionally IP-Adapter + CLIP-Vision (~2 GB)
 ```
 
-Ollama pulls the caption model (`qwen2.5vl:7b`) on first use.
+The caption model is fetched on first use: Ollama pulls `qwen2.5vl:7b`, and llama-server downloads the GGUF from Hugging Face.
 
 ## Usage
 
@@ -37,8 +37,25 @@ gvc run input.mp4 --preset literal --style "watercolor painting"
 gvc run input.mp4 -n 48                               # first 48 frames only, for quick tests
 ```
 
-`gvc run` starts `ollama serve` and `sd-server` when they are not already running, and stops them again.
+`gvc run` starts the caption server (`ollama serve` or `llama-server`) and `sd-server` when they are not already running, and stops them again.
 The models therefore never share VRAM: the caption model is unloaded before image generation starts.
+
+### Caption backend and speed
+
+Captioning is usually slower than generating the image, so it's worth tuning:
+
+- `caption.backend`: `ollama` (default; pulls models automatically) or `llama-server` (llama.cpp; more tuning knobs via `caption.llama_server_args`).
+- `caption.image_size` (default 512): frames are scaled down before captioning. Vision models like Qwen2.5-VL spend about one token per 28×28 pixels, so a full 1080p frame costs about 10× more prompt work.
+- `caption.parallel` (default 4): concurrent requests. This only applies with `caption.context = "none"`, because context captions depend on the previous caption. A `parallel` setting only reaches a server that gvc starts itself; an Ollama you started yourself uses its own `OLLAMA_NUM_PARALLEL`.
+
+Measure on your own hardware:
+
+```sh
+gvc bench input.mp4 --frames 20                                    # both backends, configured image size
+gvc bench input.mp4 --backend llama-server --image-size 512 --image-size 0
+```
+
+The bench prints seconds per frame (one request at a time, and parallel), an estimate for the whole video, and a sample caption for each combination so you can compare quality too.
 
 The individual stages can also be run on their own, and every stage is cached in `work/<video>/`:
 
@@ -49,6 +66,7 @@ The individual stages can also be run on their own, and every stage is cached in
 | `gvc caption in.mp4` | ...and caption every frame (`work/<video>/captions.jsonl`) |
 | `gvc generate in.mp4` | ...and generate every frame (`work/<video>/gen/`) |
 | `gvc run in.mp4` | ...and assemble the video |
+| `gvc bench in.mp4` | Time caption backends and image sizes |
 
 Interrupted runs resume where they stopped. If you change a setting, only the stages it affects run again.
 For example, changing `generate.strength` keeps the captions.

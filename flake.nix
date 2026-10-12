@@ -44,6 +44,7 @@
 
       # Only the AI runtimes get CUDA; everything else stays on the binary cache.
       sdCuda = pkgs.stable-diffusion-cpp.override { cudaSupport = true; };
+      llamaCuda = pkgs.llama-cpp.override { cudaSupport = true; };
 
       devPython = python.withPackages (ps: pythonDeps ps ++ [ ps.pytest ]);
 
@@ -53,7 +54,7 @@
       '';
 
       mkShell =
-        { ollama, sd }:
+        { ollama, sd, llama }:
         pkgs.mkShell {
           packages = [
             devPython
@@ -61,6 +62,7 @@
             pkgs.ffmpeg-headless
             ollama
             sd
+            llama
           ];
           shellHook = ''
             export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
@@ -75,11 +77,13 @@
         default = mkShell {
           ollama = pkgs.ollama-cuda;
           sd = sdCuda;
+          llama = llamaCuda;
         };
         # CPU-only, for development and smoke tests on machines without an NVIDIA GPU.
         cpu = mkShell {
           ollama = pkgs.ollama;
           sd = pkgs.stable-diffusion-cpp;
+          llama = pkgs.llama-cpp;
         };
       };
     };

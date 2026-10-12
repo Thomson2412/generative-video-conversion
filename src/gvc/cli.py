@@ -10,7 +10,8 @@ from rich.console import Console
 from rich.table import Table
 
 from . import models, video
-from .config import CAPTION_CONTEXTS, GENERATE_INITS, PRESETS, REF_METHODS, Config, ConfigError, load_config
+from .bench import bench as run_bench
+from .config import CAPTION_BACKENDS, CAPTION_CONTEXTS, GENERATE_INITS, PRESETS, REF_METHODS, Config, ConfigError, load_config
 from .pipeline import Pipeline
 from .service import ServiceError
 
@@ -27,6 +28,9 @@ MaxFramesOpt = Annotated[Optional[int], typer.Option("--max-frames", "-n", help=
 ContextOpt = Annotated[Optional[str], typer.Option("--caption-context", help=f"Caption propagation: {' | '.join(CAPTION_CONTEXTS)}.")]
 WindowOpt = Annotated[Optional[int], typer.Option("--caption-window", help="Previous captions passed as context.")]
 CaptionModelOpt = Annotated[Optional[str], typer.Option("--caption-model", help="Ollama vision model.")]
+BackendOpt = Annotated[Optional[str], typer.Option("--caption-backend", help=f"Caption backend: {' | '.join(CAPTION_BACKENDS)}.")]
+ImageSizeOpt = Annotated[Optional[int], typer.Option("--caption-image-size", help="Longest side sent to the LLM (0 = original).")]
+ParallelOpt = Annotated[Optional[int], typer.Option("--parallel", help="Concurrent caption requests (caption context 'none' only).")]
 InitOpt = Annotated[Optional[str], typer.Option("--init", help=f"Image propagation: {' | '.join(GENERATE_INITS)}.")]
 StrengthOpt = Annotated[Optional[float], typer.Option("--strength", help="img2img denoising strength (chain, source).")]
 RefMethodOpt = Annotated[Optional[str], typer.Option("--ref-method", help=f"chain-ref method: {' | '.join(REF_METHODS)}.")]
@@ -47,9 +51,19 @@ def _config(
     ref_strength: float | None = None,
     seed: int | None = None,
     style: str | None = None,
+    caption_backend: str | None = None,
+    caption_image_size: int | None = None,
+    parallel: int | None = None,
 ) -> Config:
     overrides: dict[str, dict[str, Any]] = {
-        "caption": {"context": caption_context, "window": caption_window, "model": caption_model},
+        "caption": {
+            "context": caption_context,
+            "window": caption_window,
+            "model": caption_model,
+            "backend": caption_backend,
+            "image_size": caption_image_size,
+            "parallel": parallel,
+        },
         "generate": {
             "init": init,
             "strength": strength,
@@ -117,9 +131,15 @@ def caption(
     caption_context: ContextOpt = None,
     caption_window: WindowOpt = None,
     caption_model: CaptionModelOpt = None,
+    caption_backend: BackendOpt = None,
+    caption_image_size: ImageSizeOpt = None,
+    parallel: ParallelOpt = None,
 ) -> None:
     """Run the pipeline up to and including captioning."""
-    cfg = _config(config, preset, caption_context, caption_window, caption_model)
+    cfg = _config(
+        config, preset, caption_context, caption_window, caption_model,
+        caption_backend=caption_backend, caption_image_size=caption_image_size, parallel=parallel,
+    )
     p = _pipeline(input, cfg, workdir, max_frames)
     _guard(p.caption)
 
@@ -140,9 +160,15 @@ def generate(
     ref_strength: RefStrengthOpt = None,
     seed: SeedOpt = None,
     style: StyleOpt = None,
+    caption_backend: BackendOpt = None,
+    caption_image_size: ImageSizeOpt = None,
+    parallel: ParallelOpt = None,
 ) -> None:
     """Run the pipeline up to and including image generation."""
-    cfg = _config(config, preset, caption_context, caption_window, caption_model, init, strength, ref_method, ref_strength, seed, style)
+    cfg = _config(
+        config, preset, caption_context, caption_window, caption_model, init, strength, ref_method, ref_strength,
+        seed, style, caption_backend, caption_image_size, parallel,
+    )
     p = _pipeline(input, cfg, workdir, max_frames)
     _guard(p.generate)
 
@@ -164,11 +190,57 @@ def run(
     ref_strength: RefStrengthOpt = None,
     seed: SeedOpt = None,
     style: StyleOpt = None,
+    caption_backend: BackendOpt = None,
+    caption_image_size: ImageSizeOpt = None,
+    parallel: ParallelOpt = None,
 ) -> None:
     """Run the whole pipeline and write the output video."""
-    cfg = _config(config, preset, caption_context, caption_window, caption_model, init, strength, ref_method, ref_strength, seed, style)
+    cfg = _config(
+        config, preset, caption_context, caption_window, caption_model, init, strength, ref_method, ref_strength,
+        seed, style, caption_backend, caption_image_size, parallel,
+    )
     p = _pipeline(input, cfg, workdir, max_frames)
     _guard(lambda: p.run(output or Path(f"{input.stem}_gvc.mp4")))
+
+
+@app.command()
+def bench(
+    input: Input,
+    frames: Annotated[int, typer.Option("--frames", help="Number of frames to caption per combination.")] = 20,
+    backend: Annotated[Optional[list[str]], typer.Option("--backend", help="Backend to test; repeatable (default: all).")] = None,
+    image_size: Annotated[Optional[list[int]], typer.Option("--image-size", help="Image size to test; repeatable (default: config).")] = None,
+    parallel: ParallelOpt = None,
+    config: ConfigOpt = None,
+    workdir: WorkdirOpt = None,
+    max_frames: MaxFramesOpt = None,
+) -> None:
+    """Time caption backends and image sizes on frames of a real video."""
+    cfg = _config(config, None, parallel=parallel)
+    backends = backend or list(CAPTION_BACKENDS)
+    for b in backends:
+        if b not in CAPTION_BACKENDS:
+            raise typer.BadParameter(f"unknown backend {b!r}")
+    sizes = image_size or [cfg.caption.image_size]
+    p = _pipeline(input, cfg, workdir, max_frames)
+    results = _guard(lambda: run_bench(p, backends, sizes, frames, cfg.caption.parallel))
+
+    table = Table("backend", "image size", "s/frame", f"s/frame ({cfg.caption.parallel} parallel)", "whole video*")
+    unique = sum(1 for i, d in enumerate(p.analyze().dup_of) if i == d)
+    for r in results:
+        best = min(r.sequential, r.parallel or r.sequential)
+        table.add_row(
+            r.backend,
+            str(r.image_size or "original"),
+            f"{r.sequential:.2f}",
+            f"{r.parallel:.2f}" if r.parallel is not None else "-",
+            f"{r.sequential * unique / 60:.1f} min / {best * unique / 60:.1f} min",
+        )
+    console.print(table)
+    console.print(
+        f"* {unique} unique frames: sequential (caption context text/text+image) / fastest (context none)"
+    )
+    for r in results:
+        console.print(f"[dim]{r.backend} @ {r.image_size or 'original'}:[/] {r.sample}")
 
 
 @app.command()
