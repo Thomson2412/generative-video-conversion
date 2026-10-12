@@ -1,0 +1,48 @@
+# gvc configuration. Every key is optional; CLI flags override this file.
+# Precedence: built-in defaults <- preset <- this file <- CLI flags.
+
+# literal | stable-text | chain | full | full-ref | guided   (see `gvc presets`)
+preset = "full"
+
+[caption]
+model = "qwen2.5vl:7b"
+# context = "text"        # none | text | text+image   (set by the preset)
+window = 1
+max_words = 60
+temperature = 0.2
+seed = 42
+# ollama_url = "http://127.0.0.1:11434"
+# manage_server = true
+
+[generate]
+# init = "chain"          # none | chain | chain-ref | source   (set by the preset)
+strength = 0.55           # img2img strength for chain / source
+ref_method = "ip-adapter" # chain-ref: ip-adapter | ref-images
+ref_strength = 0.7
+seed = 42
+steps = 4
+cfg_scale = 1.0
+sampler = "euler_a"
+size = 512
+style = ""                # e.g. "oil painting, thick brush strokes"
+negative_prompt = ""
+model = "models/sd_xl_turbo_1.0_fp16.safetensors"
+vae = "models/sdxl_vae-fp16-fix.safetensors"
+ip_adapter = "models/ip-adapter_sdxl_vit-h.safetensors"
+clip_vision = "models/clip_vision_h.safetensors"
+server_args = ["--diffusion-fa"]
+# server_url = "http://127.0.0.1:7860"
+# manage_server = true
+
+[dedupe]
+max_distance = 2          # perceptual hash distance; -1 disables
+
+[reset]
+scene_threshold = 0.25    # frame difference (0..1) that counts as a scene cut
+every_n = 0               # also restart both chains every N frames (0 = off)
+
+[output]
+keep_audio = true
+codec = "libx264"
+crf = 18
+scale_to_source = true
