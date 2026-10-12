@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gvc"
+version = "0.1.0"
+description = "Generative video conversion: video -> captions -> generated frames -> video"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = ["httpx", "typer", "rich", "pillow", "imagehash"]
+
+[project.scripts]
+gvc = "gvc.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gvc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

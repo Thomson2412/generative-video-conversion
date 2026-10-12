@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# gvc
+work/
+models/
+result
+*_gvc.mp4
