@@ -5,7 +5,15 @@ import json
 import httpx
 from PIL import Image
 
-from gvc.captioner import LlamaServerCaptioner, OllamaCaptioner, clean_caption, encode_image, llama_server_cmd
+from gvc.captioner import (
+    FADE_NOTE,
+    LlamaServerCaptioner,
+    OllamaCaptioner,
+    build_request,
+    clean_caption,
+    encode_image,
+    llama_server_cmd,
+)
 from gvc.config import CaptionConfig, GenerateConfig
 from gvc.generator import SdServerGenerator, generation_size, sd_server_cmd
 from gvc.service import is_up
@@ -70,6 +78,13 @@ def test_ollama_context_message(tmp_path):
     captioner.describe(cur, [])
     user = json.loads(requests[1].content)["messages"][1]
     assert len(user["images"]) == 1
+
+
+def test_fade_note_only_for_faded_frames(tmp_path):
+    cur, prev = _frames(tmp_path)
+    for history, prev_image in (([], None), (["a cat"], None), (["a cat"], prev)):
+        assert FADE_NOTE not in build_request(cur, history, prev_image, 64)[0]
+        assert build_request(cur, history, prev_image, 64, faded=True)[0].endswith(FADE_NOTE)
 
 
 def test_llama_server_openai_message(tmp_path):

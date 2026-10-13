@@ -34,6 +34,27 @@ def sample_video(tmp_path_factory) -> Path:
     return path
 
 
+@pytest.fixture(scope="session")
+def fade_video(tmp_path_factory) -> Path:
+    """22 frames: 3 black, a test pattern fading in and out over 6 frames each, 3 black."""
+    path = tmp_path_factory.mktemp("video") / "fade.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=160x90:r={FPS}",
+            "-f", "lavfi", "-i", f"testsrc2=s=160x90:r={FPS}",
+            "-filter_complex",
+            "[0:v]trim=end_frame=3,split[a][c];"
+            "[1:v]trim=end_frame=16,fade=t=in:s=0:n=6,fade=t=out:s=10:n=6[b];"
+            "[a][b][c]concat=n=3:v=1:a=0,setpts=N/(30000/1001)/TB[v]",
+            "-map", "[v]", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", "-r", FPS,
+            str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
 def png(color: tuple[int, int, int], size: tuple[int, int]) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", size, color).save(buf, format="PNG")
@@ -45,10 +66,12 @@ class FakeCaptioner:
         self.calls: list[dict] = []
         self.fail_after = fail_after
 
-    def describe(self, image: Path, history: list[str], prev_image: Path | None = None) -> str:
+    def describe(self, image: Path, history: list[str], prev_image: Path | None = None, faded: bool = False) -> str:
         if self.fail_after is not None and len(self.calls) >= self.fail_after:
             raise RuntimeError("simulated crash")
-        self.calls.append({"image": image.name, "history": list(history), "prev_image": prev_image})
+        self.calls.append(
+            {"image": image.name, "path": image, "history": list(history), "prev_image": prev_image, "faded": faded}
+        )
         return f"a picture of {image.stem}"
 
 

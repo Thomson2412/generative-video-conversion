@@ -126,6 +126,19 @@ class ResetConfig:
 
 
 @dataclass
+class FadeConfig:
+    # Fades to and from black are applied after generation: the generator draws the
+    # content at full brightness and the result is dimmed to match the source.
+    enabled: bool = True
+    # Mean brightness (0..1) at or below which a source frame counts as black. Black
+    # frames are not captioned or generated, they stay black.
+    black_level: float = 0.03
+    # Minimum brightness rise per frame (relative) for a frame next to black to be
+    # part of a fade ramp rather than the shot itself.
+    min_rise: float = 0.005
+
+
+@dataclass
 class OutputConfig:
     keep_audio: bool = True
     codec: str = "libx264"
@@ -141,6 +154,7 @@ class Config:
     generate: GenerateConfig = field(default_factory=GenerateConfig)
     dedupe: DedupeConfig = field(default_factory=DedupeConfig)
     reset: ResetConfig = field(default_factory=ResetConfig)
+    fade: FadeConfig = field(default_factory=FadeConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def validate(self) -> None:
@@ -160,6 +174,8 @@ class Config:
             raise ConfigError("generate.strength must be between 0 and 1")
         if self.generate.size < 64:
             raise ConfigError("generate.size must be >= 64")
+        if not 0.0 <= self.fade.black_level < 1.0:
+            raise ConfigError("fade.black_level must be between 0 and 1")
 
 
 class ConfigError(ValueError):
@@ -171,6 +187,7 @@ SECTIONS = {
     "generate": GenerateConfig,
     "dedupe": DedupeConfig,
     "reset": ResetConfig,
+    "fade": FadeConfig,
     "output": OutputConfig,
 }
 

@@ -1,7 +1,9 @@
+import io
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageStat
 from rich.console import Console
 
 from gvc import video
@@ -148,8 +150,8 @@ def test_changing_generate_settings_keeps_captions(sample_video, tmp_path, fake_
 
 def test_stale_caption_is_redone_without_context(sample_video, tmp_path):
     class Echo(FakeCaptioner):
-        def describe(self, image, history, prev_image=None):
-            super().describe(image, history, prev_image)
+        def describe(self, image, history, prev_image=None, faded=False):
+            super().describe(image, history, prev_image, faded)
             return history[-1] if history else f"fresh {image.stem}"
 
     p = make(sample_video, tmp_path, "stable-text", caption={"stale_diff": 0.0}, dedupe={"max_distance": -1})
@@ -189,3 +191,45 @@ def test_bench_sample_frames():
 
     assert sample_frames([0, 0, 2, 3, 3, 5], 10) == [0, 2, 3, 5]
     assert sample_frames(list(range(100)), 4) == [0, 25, 50, 75]
+
+
+def _mean(path_or_bytes) -> float:
+    src = io.BytesIO(path_or_bytes) if isinstance(path_or_bytes, bytes) else path_or_bytes
+    with Image.open(src) as img:
+        return sum(ImageStat.Stat(img.convert("RGB")).mean) / 3
+
+
+def test_black_frames_and_fades(fade_video, tmp_path, fake_captioner, fake_generator):
+    p = make(fade_video, tmp_path, "full")
+    run(p, fake_captioner, fake_generator, tmp_path)
+    a = analysis(p)
+    n = len(a.fade)
+
+    # Black frames never reach the captioner or the generator, and stay black.
+    captioned = {int(Path(c["image"]).stem) - 1 for c in fake_captioner.calls}
+    assert not any(a.black[i] for i in captioned)
+    assert len(fake_generator.calls) == n - sum(a.black)
+    assert all(_mean(p.wd.gen / frame_name(i)) == 0 for i in range(n) if a.black[i])
+
+    # Faded frames are captioned from a brightened copy, with the fade note.
+    for call in fake_captioner.calls:
+        i = int(Path(call["image"]).stem) - 1
+        assert call["faded"] == (a.fade[i] < 1.0)
+        if call["faded"]:
+            assert call["path"].parent == p.wd.restored
+            assert _mean(call["path"]) > _mean(p.wd.frames / frame_name(i))
+
+    lit = [i for i in range(n) if not a.black[i]]
+    for k, i in enumerate(lit):
+        call = fake_generator.calls[k]
+        level = a.fade[i]
+        if level < 1.0:
+            # Generated at full brightness, dimmed to the source's fade level afterwards.
+            raw = (p.wd.gen_raw / frame_name(i)).read_bytes()
+            assert _mean(gen_bytes(p, i)) == pytest.approx(_mean(raw) * level, abs=1.5)
+        if a.reset[i]:
+            assert call["init"] is None
+        else:
+            # The chain continues from the undimmed frame, so the fade does not compound.
+            prev = p.wd.gen_raw / frame_name(i - 1)
+            assert call["init"] == (prev.read_bytes() if a.fade[i - 1] < 1.0 else gen_bytes(p, i - 1))

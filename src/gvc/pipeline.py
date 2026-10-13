@@ -2,9 +2,11 @@
 
 Layout of work/<video>/:
     frames/          extracted source frames 000001.png ...
-    analysis.json    duplicates, frame differences, scene resets
+    analysis.json    duplicates, frame differences, scene resets, black frames, fades
+    restored/        faded source frames brightened back up, used for captioning
     captions.jsonl   one caption per frame, appended as they finish
-    gen/             generated frames 000001.png ...
+    gen/             generated frames 000001.png ... (fades applied)
+    gen_raw/         generated frames before dimming, only for faded frames
     manifest.json    fingerprint + completion state per stage
     logs/            output of managed servers
 
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from PIL import Image
+from PIL import Image, ImageEnhance
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
@@ -50,6 +52,14 @@ class Workdir:
     @property
     def gen(self) -> Path:
         return self.root / "gen"
+
+    @property
+    def gen_raw(self) -> Path:
+        return self.root / "gen_raw"
+
+    @property
+    def restored(self) -> Path:
+        return self.root / "restored"
 
     @property
     def analysis(self) -> Path:
@@ -94,6 +104,10 @@ class Manifest:
         self.save()
 
 
+# Upper bound for brightening a faded frame before captioning; beyond this it is mostly noise.
+MAX_RESTORE_GAIN = 8.0
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
@@ -105,6 +119,18 @@ def _reset_path(path: Path) -> None:
         shutil.rmtree(path)
     elif path.exists():
         path.unlink()
+
+
+def _scale_brightness(img: Image.Image, factor: float) -> bytes:
+    buf = io.BytesIO()
+    ImageEnhance.Brightness(img.convert("RGB")).enhance(factor).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _black_png(width: int, height: int) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def load_captions(path: Path) -> dict[int, dict]:
@@ -161,7 +187,7 @@ class Pipeline:
         return fingerprint(str(self.input), stat.st_size, stat.st_mtime_ns, self.max_frames)
 
     def _fp_analyze(self) -> str:
-        return fingerprint(self._fp_extract(), self.cfg.dedupe, self.cfg.reset)
+        return fingerprint(self._fp_extract(), self.cfg.dedupe, self.cfg.reset, self.cfg.fade)
 
     def _fp_caption(self) -> str:
         return fingerprint(self._fp_analyze(), self.cfg.caption, PROMPTS)
@@ -195,10 +221,15 @@ class Pipeline:
         if self.manifest.complete("analyze", fp):
             return Analysis.load(self.wd.analysis)
         self.manifest.begin("analyze", fp)
-        result = analyze(self.wd.frames, self.frame_count, self.cfg.dedupe, self.cfg.reset)
+        result = analyze(self.wd.frames, self.frame_count, self.cfg.dedupe, self.cfg.reset, self.cfg.fade)
+        self._restore_faded(result)
         result.save(self.wd.analysis)
         unique = sum(1 for i, d in enumerate(result.dup_of) if i == d)
-        self.console.print(f"Analyzed {self.frame_count} frames: {unique} unique, {sum(result.reset)} chain resets")
+        faded = sum(1 for lv in result.fade if lv < 1.0)
+        self.console.print(
+            f"Analyzed {self.frame_count} frames: {unique} unique, {sum(result.reset)} chain resets, "
+            f"{sum(result.black)} black, {faded} fading"
+        )
         self.manifest.finish("analyze")
         return result
 
@@ -225,8 +256,10 @@ class Pipeline:
             return
         if not self.manifest.matches("generate", fp):
             _reset_path(self.wd.gen)
+            _reset_path(self.wd.gen_raw)
             self.manifest.begin("generate", fp)
         self.wd.gen.mkdir(parents=True, exist_ok=True)
+        self.wd.gen_raw.mkdir(parents=True, exist_ok=True)
         if generator is not None:
             self._generate_frames(analysis, generator)
         else:
@@ -269,6 +302,24 @@ class Pipeline:
     def _gen(self, i: int) -> Path:
         return self.wd.gen / frame_name(i)
 
+    def _raw(self, i: int) -> Path:
+        """Generated frame at full brightness, what the chain carries on from."""
+        raw = self.wd.gen_raw / frame_name(i)
+        return raw if raw.exists() else self._gen(i)
+
+    def _caption_image(self, i: int, analysis: Analysis) -> Path:
+        """Source frame as the captioner sees it: faded frames brightened back up."""
+        return self.wd.restored / frame_name(i) if analysis.fade[i] < 1.0 else self._frame(i)
+
+    def _restore_faded(self, analysis: Analysis) -> None:
+        _reset_path(self.wd.restored)
+        self.wd.restored.mkdir()
+        for i, level in enumerate(analysis.fade):
+            if level < 1.0:
+                with Image.open(self._frame(i)) as img:
+                    data = _scale_brightness(img, min(1.0 / level, MAX_RESTORE_GAIN))
+                _write_atomic(self.wd.restored / frame_name(i), data)
+
     def _loop(self, label: str, done: Callable[[int], bool]) -> Iterator[int]:
         """Yield the indices still to do, with a progress bar over all frames."""
         n = self.frame_count
@@ -294,7 +345,9 @@ class Pipeline:
                 self._caption_parallel(analysis, captioner, captions, save, c.parallel)
             for i in self._loop("Captioning", lambda i: i in captions):
                 canonical = analysis.dup_of[i]
-                if canonical != i:
+                if analysis.black[i]:
+                    save({"i": i, "caption": "", "kind": "black"})
+                elif canonical != i and not analysis.black[canonical]:
                     save({"i": i, "caption": captions[canonical]["caption"], "kind": "dup"})
                 else:
                     save(self._caption_one(i, analysis, captions, captioner, c))
@@ -302,12 +355,18 @@ class Pipeline:
     def _caption_parallel(
         self, analysis: Analysis, captioner: Captioner, captions: dict[int, dict], save: Callable[[dict], None], workers: int
     ) -> None:
-        todo = [i for i in range(self.frame_count) if analysis.dup_of[i] == i and i not in captions]
+        todo = [
+            i for i in range(self.frame_count)
+            if analysis.dup_of[i] == i and not analysis.black[i] and i not in captions
+        ]
         pool = ThreadPoolExecutor(workers)
         try:
             with _progress(self.console) as progress:
                 task = progress.add_task(f"Captioning ({workers} parallel)", total=len(todo))
-                futures = {pool.submit(captioner.describe, self._frame(i), []): i for i in todo}
+                futures = {
+                    pool.submit(captioner.describe, self._caption_image(i, analysis), [], faded=analysis.fade[i] < 1.0): i
+                    for i in todo
+                }
                 for future in as_completed(futures):
                     save({"i": futures[future], "caption": future.result(), "kind": "fresh"})
                     progress.advance(task)
@@ -316,24 +375,27 @@ class Pipeline:
             pool.shutdown(cancel_futures=True)
 
     def _caption_one(self, i, analysis: Analysis, captions: dict[int, dict], captioner: Captioner, c) -> dict:
+        image, faded = self._caption_image(i, analysis), analysis.fade[i] < 1.0
         use_context = c.context != "none" and not analysis.reset[i]
         if not use_context:
-            return {"i": i, "caption": captioner.describe(self._frame(i), []), "kind": "fresh"}
+            return {"i": i, "caption": captioner.describe(image, [], faded=faded), "kind": "fresh"}
 
         # Previous captions since the last chain reset, collapsing duplicate-frame repeats.
         start = analysis.last_reset(i)
         history: list[str] = []
         for j in range(start, i):
             text = captions[j]["caption"]
-            if not history or history[-1] != text:
+            if text and (not history or history[-1] != text):
                 history.append(text)
         history = history[-c.window:]
-        prev_image = self._frame(i - 1) if c.context == "text+image" else None
+        if not history:
+            return {"i": i, "caption": captioner.describe(image, [], faded=faded), "kind": "fresh"}
+        prev_image = self._caption_image(i - 1, analysis) if c.context == "text+image" else None
 
-        text = captioner.describe(self._frame(i), history, prev_image)
+        text = captioner.describe(image, history, prev_image, faded=faded)
         if similarity(text, history[-1]) >= c.stale_similarity and analysis.diff[i] >= c.stale_diff:
             # The model just echoed the previous caption although the picture changed.
-            return {"i": i, "caption": captioner.describe(self._frame(i), []), "kind": "stale-retry"}
+            return {"i": i, "caption": captioner.describe(image, [], faded=faded), "kind": "stale-retry"}
         return {"i": i, "caption": text, "kind": "context"}
 
     def _generate_frames(self, analysis: Analysis, generator: Generator) -> None:
@@ -353,24 +415,33 @@ class Pipeline:
             return False
 
         for i in self._loop("Generating", done):
+            if analysis.black[i]:
+                _write_atomic(self._gen(i), _black_png(w, h))
+                continue
             prompt = prompts[i]
             fresh = analysis.reset[i]
             if g.init == "none" or (fresh and g.init in ("chain", "chain-ref")):
                 if g.init == "none" and prompt in first_with_prompt:
-                    data = self._gen(first_with_prompt[prompt]).read_bytes()
+                    data = self._raw(first_with_prompt[prompt]).read_bytes()
                 else:
                     data = generator.generate(prompt, w, h, g.seed)
             elif g.init == "chain":
-                data = generator.generate(prompt, w, h, g.seed, init=self._gen(i - 1).read_bytes(), strength=g.strength)
+                data = generator.generate(prompt, w, h, g.seed, init=self._raw(i - 1).read_bytes(), strength=g.strength)
             elif g.init == "chain-ref":
-                data = generator.generate(prompt, w, h, g.seed, reference=self._gen(i - 1).read_bytes())
+                data = generator.generate(prompt, w, h, g.seed, reference=self._raw(i - 1).read_bytes())
             else:  # source
-                data = generator.generate(prompt, w, h, g.seed, init=self._source_init(i, w, h), strength=g.strength)
+                data = generator.generate(prompt, w, h, g.seed, init=self._source_init(i, analysis, w, h), strength=g.strength)
+            level = analysis.fade[i]
+            if level < 1.0:
+                # Keep the full-brightness image for the chain, so the fade never compounds.
+                _write_atomic(self.wd.gen_raw / frame_name(i), data)
+                with Image.open(io.BytesIO(data)) as img:
+                    data = _scale_brightness(img, level)
             _write_atomic(self._gen(i), data)
             first_with_prompt.setdefault(prompt, i)
 
-    def _source_init(self, i: int, w: int, h: int) -> bytes:
-        with Image.open(self._frame(i)) as img:
+    def _source_init(self, i: int, analysis: Analysis, w: int, h: int) -> bytes:
+        with Image.open(self._caption_image(i, analysis)) as img:
             buf = io.BytesIO()
             img.convert("RGB").resize((w, h), Image.Resampling.LANCZOS).save(buf, format="PNG")
             return buf.getvalue()

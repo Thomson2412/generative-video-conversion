@@ -116,6 +116,7 @@ There are two independent propagation settings.
 - **Chain resets:** at a scene cut (`reset.scene_threshold`) both chains restart, with a fresh caption and a txt2img image. `reset.every_n` adds periodic restarts against drift.
 - **Dedupe:** near-identical source frames (`dedupe.max_distance`) reuse the previous caption. With `init = "none"`, the image is reused too.
 - **Stuck captions:** if a context caption is nearly identical to the previous one although the frame changed, it is redone without context. See `caption.stale_similarity` and `caption.stale_diff`.
+- **Black frames and fades:** frames at or below `fade.black_level` stay black: they are not captioned or generated, and the first frame after them restarts both chains. Frames that fade to or from black are brightened before captioning, generated at full brightness, then dimmed to the source's brightness. The undimmed image is what the chain continues from, so a fade never compounds. Crossfades and fades to white are not handled.
 
 ## Configuration
 

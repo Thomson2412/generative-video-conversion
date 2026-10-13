@@ -46,14 +46,24 @@ movement, e.g. panning left or zooming in. Use only the second image for everyth
 
 FRESH_PROMPT = "Describe this image."
 
+# Appended for frames inside a fade to or from black. The pipeline brightens them
+# before captioning and applies the fade itself after generation, so the caption
+# must describe the content at normal exposure.
+FADE_NOTE = """This frame is part of a fade to or from black and was brightened back to normal \
+exposure, so it may look noisy, grainy or washed out. Describe it as it would look \
+at normal exposure. Do not mention darkness, the fade, noise or grain; where details \
+are unclear, keep them from the latest description."""
+
 # Part of the caption stage fingerprint, so editing a prompt redoes cached captions.
-PROMPTS = (SYSTEM_PROMPT, CONTEXT_PROMPT, CONTEXT_IMAGE_PROMPT, FRESH_PROMPT)
+PROMPTS = (SYSTEM_PROMPT, CONTEXT_PROMPT, CONTEXT_IMAGE_PROMPT, FRESH_PROMPT, FADE_NOTE)
 
 JPEG_QUALITY = 90
 
 
 class Captioner(Protocol):
-    def describe(self, image: Path, history: list[str], prev_image: Path | None = None) -> str: ...
+    def describe(
+        self, image: Path, history: list[str], prev_image: Path | None = None, faded: bool = False
+    ) -> str: ...
 
 
 def encode_image(path: Path, max_size: int) -> str:
@@ -78,18 +88,21 @@ def clean_caption(text: str) -> str:
 
 
 def build_request(
-    image: Path, history: list[str], prev_image: Path | None, max_size: int
+    image: Path, history: list[str], prev_image: Path | None, max_size: int, faded: bool = False
 ) -> tuple[str, list[str]]:
     """User prompt text and the base64 images to send with it, in order."""
     if not history:
-        return FRESH_PROMPT, [encode_image(image, max_size)]
-    numbered = "\n".join(f"- {h}" for h in history)
-    if prev_image is None:
-        return CONTEXT_PROMPT.format(history=numbered), [encode_image(image, max_size)]
-    return CONTEXT_IMAGE_PROMPT.format(history=numbered), [
-        encode_image(prev_image, max_size),
-        encode_image(image, max_size),
-    ]
+        text, images = FRESH_PROMPT, [encode_image(image, max_size)]
+    elif prev_image is None:
+        numbered = "\n".join(f"- {h}" for h in history)
+        text, images = CONTEXT_PROMPT.format(history=numbered), [encode_image(image, max_size)]
+    else:
+        numbered = "\n".join(f"- {h}" for h in history)
+        text = CONTEXT_IMAGE_PROMPT.format(history=numbered)
+        images = [encode_image(prev_image, max_size), encode_image(image, max_size)]
+    if faded:
+        text = f"{text}\n\n{FADE_NOTE}"
+    return text, images
 
 
 class OllamaCaptioner:
@@ -123,8 +136,10 @@ class OllamaCaptioner:
         else:
             r.raise_for_status()
 
-    def describe(self, image: Path, history: list[str], prev_image: Path | None = None) -> str:
-        text, images = build_request(image, history, prev_image, self.image_size)
+    def describe(
+        self, image: Path, history: list[str], prev_image: Path | None = None, faded: bool = False
+    ) -> str:
+        text, images = build_request(image, history, prev_image, self.image_size, faded)
         r = self.client.post(
             "/api/chat",
             json={
@@ -166,8 +181,10 @@ class LlamaServerCaptioner:
         self.params = {"temperature": temperature, "seed": seed, "max_tokens": max_words * 3}
         self.client = httpx.Client(base_url=url, timeout=timeout, transport=transport)
 
-    def describe(self, image: Path, history: list[str], prev_image: Path | None = None) -> str:
-        text, images = build_request(image, history, prev_image, self.image_size)
+    def describe(
+        self, image: Path, history: list[str], prev_image: Path | None = None, faded: bool = False
+    ) -> str:
+        text, images = build_request(image, history, prev_image, self.image_size, faded)
         content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in images]
         content.append({"type": "text", "text": text})
         r = self.client.post(
