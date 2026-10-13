@@ -32,7 +32,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 
 from . import video
 from .analysis import Analysis, analyze
-from .captioner import Captioner, captioner_service
+from .captioner import PROMPTS, Captioner, captioner_service
 from .config import Config, fingerprint
 from .generator import Generator, SdServerGenerator, build_prompt, generation_size, sd_server_cmd
 from .service import managed_service
@@ -164,7 +164,7 @@ class Pipeline:
         return fingerprint(self._fp_extract(), self.cfg.dedupe, self.cfg.reset)
 
     def _fp_caption(self) -> str:
-        return fingerprint(self._fp_analyze(), self.cfg.caption)
+        return fingerprint(self._fp_analyze(), self.cfg.caption, PROMPTS)
 
     def _fp_generate(self) -> str:
         return fingerprint(self._fp_caption(), self.cfg.generate, self.gen_size)

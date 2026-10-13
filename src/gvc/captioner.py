@@ -27,7 +27,10 @@ Descriptions of the previous frames, oldest first:
 {history}
 
 Describe this new frame. Keep the wording of the latest description wherever it still \
-applies and change only what is different, so consecutive descriptions stay consistent."""
+applies and change only what is different, so consecutive descriptions stay consistent. \
+Where a subject's pose or position has changed from the latest description, describe the \
+movement as it looks in this frame: the action under way, its direction, and visible cues \
+such as mid-stride limbs, leaning, flowing hair or cloth, or motion blur."""
 
 CONTEXT_IMAGE_PROMPT = """\
 The first image is the previous frame, the second image is the current frame.
@@ -35,9 +38,16 @@ Descriptions of the previous frames, oldest first:
 {history}
 
 Describe the current (second) image. Keep the wording of the latest description \
-wherever it still applies and change only what differs between the two images."""
+wherever it still applies and change only what differs between the two images. \
+Compare the two images and describe the movement: what each moving subject is doing, \
+in which direction it moves, and how it shows in the current image (mid-stride limbs, \
+leaning, flowing hair or cloth, motion blur). If the whole view shifted, name the camera \
+movement, e.g. panning left or zooming in. Use only the second image for everything else."""
 
 FRESH_PROMPT = "Describe this image."
+
+# Part of the caption stage fingerprint, so editing a prompt redoes cached captions.
+PROMPTS = (SYSTEM_PROMPT, CONTEXT_PROMPT, CONTEXT_IMAGE_PROMPT, FRESH_PROMPT)
 
 JPEG_QUALITY = 90
 
