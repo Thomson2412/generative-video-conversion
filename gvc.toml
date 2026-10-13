@@ -43,7 +43,7 @@ server_args = ["--diffusion-fa"]
 # manage_server = true
 
 [dedupe]
-max_distance = 2          # perceptual hash distance; -1 disables
+max_distance = 0          # perceptual hash distance; -1 disables
 
 [reset]
 scene_threshold = 0.25    # frame difference (0..1) that counts as a scene cut
