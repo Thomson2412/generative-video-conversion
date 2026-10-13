@@ -59,9 +59,11 @@ def count_frames(path: Path) -> int:
     """Exact number of video frames (counts packets, no decoding)."""
     out = _run([
         "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
-        "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path),
+        "-show_entries", "stream=nb_read_packets", "-of", "json", str(path),
     ])
-    return int(out.strip().split(",")[0])
+    # JSON rather than CSV: newer ffprobe also prints the stream inside "stream_groups"
+    # (e.g. MP4 video linked to a tmcd track), which would duplicate the CSV value.
+    return int(json.loads(out)["streams"][0]["nb_read_packets"])
 
 
 def probe(path: Path) -> VideoInfo:
