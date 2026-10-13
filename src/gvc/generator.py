@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import base64
-import json
 import math
+import time
 from typing import Protocol
 
 import httpx
 
 from .config import GenerateConfig
 from .service import host_port
+
+
+# Seconds between job status checks on sd-server's native API.
+POLL_INTERVAL = 0.1
 
 
 class Generator(Protocol):
@@ -82,12 +86,8 @@ class SdServerGenerator:
         if reference is not None:
             ref = base64.b64encode(reference).decode()
             if self.cfg.ref_method == "ip-adapter":
-                # sdapi has no IP-Adapter field; native sd.cpp parameters ride along
-                # inside the prompt and are stripped by the server before generation.
-                extra = {"ip_adapter_image": ref, "ip_adapter_strength": self.cfg.ref_strength}
-                prompt = f"{prompt} <sd_cpp_extra_args>{json.dumps(extra)}</sd_cpp_extra_args>"
-            else:
-                body["extra_images"] = [ref]
+                return self._native_ip_adapter(prompt, width, height, seed, ref)
+            body["extra_images"] = [ref]
         body["prompt"] = prompt
 
         endpoint = "/sdapi/v1/txt2img"
@@ -102,3 +102,42 @@ class SdServerGenerator:
         if not images:
             raise RuntimeError(f"sd-server returned no image: {r.text[:500]}")
         return base64.b64decode(images[0])
+
+    def _native_ip_adapter(self, prompt: str, width: int, height: int, seed: int, ref: str) -> bytes:
+        """txt2img with an IP-Adapter image through sd-server's native job API.
+
+        sdapi has no IP-Adapter field, and smuggling the image in through the prompt's
+        <sd_cpp_extra_args> makes the server's std::regex overflow the stack and crash.
+        """
+        body = {
+            "prompt": prompt,
+            "negative_prompt": self.cfg.negative_prompt,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "batch_count": 1,
+            "ip_adapter_image": ref,
+            "ip_adapter_strength": self.cfg.ref_strength,
+            "sample_params": {
+                "sample_method": self.cfg.sampler,
+                "sample_steps": self.cfg.steps,
+                "guidance": {"txt_cfg": self.cfg.cfg_scale},
+            },
+            "output_format": "png",
+        }
+        r = self.client.post("/sdcpp/v1/img_gen", json=body)
+        r.raise_for_status()
+        poll_url = r.json()["poll_url"]
+        deadline = time.monotonic() + self.cfg.timeout
+        while True:
+            job = self.client.get(poll_url)
+            job.raise_for_status()
+            data = job.json()
+            if data["status"] == "completed":
+                return base64.b64decode(data["result"]["images"][0]["b64_json"])
+            if data["status"] in ("failed", "cancelled"):
+                raise RuntimeError(f"sd-server job {data['status']}: {data.get('error')}")
+            if time.monotonic() > deadline:
+                self.client.post(f"{poll_url}/cancel")
+                raise RuntimeError(f"sd-server job did not finish within {self.cfg.timeout:.0f}s")
+            time.sleep(POLL_INTERVAL)

@@ -3,6 +3,7 @@ import io
 import json
 
 import httpx
+import pytest
 from PIL import Image
 
 from gvc.captioner import (
@@ -141,15 +142,29 @@ def test_sd_txt2img_and_img2img():
     assert body["seed"] == 5
 
 
-def test_sd_reference_ip_adapter_and_ref_images():
-    requests, gen = _sd(GenerateConfig(init="chain-ref", ref_strength=0.6))
-    gen.generate("a cat", 64, 64, 5, reference=b"ref")
+def test_sd_reference_ip_adapter_and_ref_images(monkeypatch):
+    monkeypatch.setattr("gvc.generator.POLL_INTERVAL", 0)
+    image = base64.b64encode(png((1, 2, 3), (8, 8))).decode()
+    polls = iter(["queued", "generating", "completed"])
+
+    def native(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"id": "job_1", "status": "queued", "poll_url": "/sdcpp/v1/jobs/job_1"})
+        status = next(polls)
+        result = {"images": [{"index": 0, "b64_json": image}]} if status == "completed" else None
+        return httpx.Response(200, json={"status": status, "result": result, "error": None})
+
+    requests, transport = _capture(native)
+    gen = SdServerGenerator(GenerateConfig(init="chain-ref", ref_strength=0.6), transport=transport)
+    assert gen.generate("a cat", 64, 64, 5, reference=b"ref") == base64.b64decode(image)
+    # Native API: the image is a JSON field, never part of the prompt.
+    assert requests[0].url.path == "/sdcpp/v1/img_gen"
     body = json.loads(requests[0].content)
-    assert requests[0].url.path == "/sdapi/v1/txt2img"
-    prompt, extra = body["prompt"].split(" <sd_cpp_extra_args>")
-    assert prompt == "a cat"
-    extra = json.loads(extra.removesuffix("</sd_cpp_extra_args>"))
-    assert extra == {"ip_adapter_image": base64.b64encode(b"ref").decode(), "ip_adapter_strength": 0.6}
+    assert body["prompt"] == "a cat"
+    assert body["ip_adapter_image"] == base64.b64encode(b"ref").decode()
+    assert body["ip_adapter_strength"] == 0.6
+    assert body["seed"] == 5 and body["sample_params"]["sample_steps"] == GenerateConfig().steps
+    assert [r.url.path for r in requests[1:]] == ["/sdcpp/v1/jobs/job_1"] * 3
 
     requests, gen = _sd(GenerateConfig(init="chain-ref", ref_method="ref-images"))
     gen.generate("a cat", 64, 64, 5, reference=b"ref")
@@ -164,3 +179,17 @@ def test_sd_server_cmd_loads_ip_adapter_only_when_needed():
     assert cmd[:5] == ["sd-server", "-l", "0.0.0.0", "--listen-port", "9000"]
     assert "--ip-adapter" in cmd and "--clip_vision" in cmd
     assert cmd[-1] == "--diffusion-fa"
+
+
+def test_sd_native_job_failure_raises(monkeypatch):
+    monkeypatch.setattr("gvc.generator.POLL_INTERVAL", 0)
+
+    def native(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"id": "j", "status": "queued", "poll_url": "/sdcpp/v1/jobs/j"})
+        return httpx.Response(200, json={"status": "failed", "result": None, "error": {"message": "boom"}})
+
+    _, transport = _capture(native)
+    gen = SdServerGenerator(GenerateConfig(init="chain-ref"), transport=transport)
+    with pytest.raises(RuntimeError, match="boom"):
+        gen.generate("a cat", 64, 64, 5, reference=b"ref")
