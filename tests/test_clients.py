@@ -140,6 +140,11 @@ def test_sd_txt2img_and_img2img():
     assert body["denoising_strength"] == 0.4
     assert body["init_images"] == [base64.b64encode(b"init").decode()]
     assert body["seed"] == 5
+    assert "scheduler" not in body  # server default unless configured
+
+    requests, gen = _sd(GenerateConfig(scheduler="karras"))
+    gen.generate("a cat", 64, 64, 5)
+    assert json.loads(requests[0].content)["scheduler"] == "karras"
 
 
 def test_sd_reference_ip_adapter_and_ref_images(monkeypatch):

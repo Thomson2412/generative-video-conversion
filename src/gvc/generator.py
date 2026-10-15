@@ -83,6 +83,8 @@ class SdServerGenerator:
             "sampler_name": self.cfg.sampler,
             "batch_size": 1,
         }
+        if self.cfg.scheduler:
+            body["scheduler"] = self.cfg.scheduler
         if reference is not None:
             ref = base64.b64encode(reference).decode()
             if self.cfg.ref_method == "ip-adapter":
@@ -125,6 +127,8 @@ class SdServerGenerator:
             },
             "output_format": "png",
         }
+        if self.cfg.scheduler:
+            body["sample_params"]["scheduler"] = self.cfg.scheduler
         r = self.client.post("/sdcpp/v1/img_gen", json=body)
         r.raise_for_status()
         poll_url = r.json()["poll_url"]

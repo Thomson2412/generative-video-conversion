@@ -92,6 +92,8 @@ class GenerateConfig:
     steps: int = 4
     cfg_scale: float = 1.0
     sampler: str = "euler_a"
+    # Sigma schedule, e.g. karras or exponential ("" = sd-server's default for the model).
+    scheduler: str = ""
     # Generation resolution: width*height ~= size*size, source aspect ratio, multiples of 64.
     size: int = 512
     # Appended to every caption, e.g. "watercolor painting, soft pastel colours".

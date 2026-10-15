@@ -16,6 +16,7 @@ HF = "https://huggingface.co"
 KNOWN_FILES = {
     "sd_xl_turbo_1.0_fp16.safetensors": f"{HF}/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
     "sd_turbo.safetensors": f"{HF}/stabilityai/sd-turbo/resolve/main/sd_turbo.safetensors",
+    "RealVisXL_V5.0_Lightning_fp16.safetensors": f"{HF}/SG161222/RealVisXL_V5.0_Lightning/resolve/main/RealVisXL_V5.0_Lightning_fp16.safetensors",
     "sdxl_vae-fp16-fix.safetensors": f"{HF}/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors",
     "ip-adapter_sdxl_vit-h.safetensors": f"{HF}/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter_sdxl_vit-h.safetensors",
     "ip-adapter-plus_sdxl_vit-h.safetensors": f"{HF}/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors",
